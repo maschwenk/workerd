@@ -670,13 +670,59 @@ void ZstdContext::getAfterWriteResult(uint32_t* availIn, uint32_t* availOut) con
 }
 
 namespace {
+// The `code` Node.js gives a zstd error: the name of its ZSTD_ErrorCode for the codes node_zlib.cc
+// lists, and ZSTD_error_GENERIC for the rest.
+kj::StringPtr zstdErrorCodeName(ZSTD_ErrorCode error) {
+  switch (error) {
+#define ZSTD_ERROR_NAME(name)                                                                      \
+  case name:                                                                                       \
+    return #name##_kj;
+    ZSTD_ERROR_NAME(ZSTD_error_no_error)
+    ZSTD_ERROR_NAME(ZSTD_error_GENERIC)
+    ZSTD_ERROR_NAME(ZSTD_error_prefix_unknown)
+    ZSTD_ERROR_NAME(ZSTD_error_version_unsupported)
+    ZSTD_ERROR_NAME(ZSTD_error_frameParameter_unsupported)
+    ZSTD_ERROR_NAME(ZSTD_error_frameParameter_windowTooLarge)
+    ZSTD_ERROR_NAME(ZSTD_error_corruption_detected)
+    ZSTD_ERROR_NAME(ZSTD_error_checksum_wrong)
+    ZSTD_ERROR_NAME(ZSTD_error_literals_headerWrong)
+    ZSTD_ERROR_NAME(ZSTD_error_dictionary_corrupted)
+    ZSTD_ERROR_NAME(ZSTD_error_dictionary_wrong)
+    ZSTD_ERROR_NAME(ZSTD_error_dictionaryCreation_failed)
+    ZSTD_ERROR_NAME(ZSTD_error_parameter_unsupported)
+    ZSTD_ERROR_NAME(ZSTD_error_parameter_combination_unsupported)
+    ZSTD_ERROR_NAME(ZSTD_error_parameter_outOfBound)
+    ZSTD_ERROR_NAME(ZSTD_error_tableLog_tooLarge)
+    ZSTD_ERROR_NAME(ZSTD_error_maxSymbolValue_tooLarge)
+    ZSTD_ERROR_NAME(ZSTD_error_maxSymbolValue_tooSmall)
+    ZSTD_ERROR_NAME(ZSTD_error_stabilityCondition_notRespected)
+    ZSTD_ERROR_NAME(ZSTD_error_stage_wrong)
+    ZSTD_ERROR_NAME(ZSTD_error_init_missing)
+    ZSTD_ERROR_NAME(ZSTD_error_memory_allocation)
+    ZSTD_ERROR_NAME(ZSTD_error_workSpace_tooSmall)
+    ZSTD_ERROR_NAME(ZSTD_error_dstSize_tooSmall)
+    ZSTD_ERROR_NAME(ZSTD_error_srcSize_wrong)
+    ZSTD_ERROR_NAME(ZSTD_error_dstBuffer_null)
+    ZSTD_ERROR_NAME(ZSTD_error_noForwardProgress_destFull)
+    ZSTD_ERROR_NAME(ZSTD_error_noForwardProgress_inputEmpty)
+#undef ZSTD_ERROR_NAME
+    default:
+      return "ZSTD_error_GENERIC"_kj;
+  }
+}
+
+// A zstd error as Node.js reports it: zstd's description as the message, the name of the error
+// code as `code` and its value as `errno`.
+CompressionError zstdError(ZSTD_ErrorCode error) {
+  return CompressionError(ZSTD_getErrorString(error), zstdErrorCodeName(error), error);
+}
+
 // Helper to check ZSTD errors and return a CompressionError if present.
 // Also sets the error code in the provided reference for later retrieval.
-kj::Maybe<CompressionError> zstdCheckError(
-    size_t result, ZSTD_ErrorCode& error, kj::StringPtr errorCode) {
+kj::Maybe<CompressionError> zstdCheckError(size_t result, ZSTD_ErrorCode& error) {
   if (ZSTD_isError(result)) {
     error = ZSTD_getErrorCode(result);
-    return CompressionError(ZSTD_getErrorName(result), errorCode, -1);
+    return zstdError(error);
   }
   return kj::none;
 }
@@ -697,13 +743,14 @@ ZstdEncoderContext::ZstdEncoderContext(ZlibMode _mode)
 kj::Maybe<CompressionError> ZstdEncoderContext::initialize(uint64_t pledgedSrcSize) {
   if (cctx_.get() == nullptr) {
     return CompressionError(
-        "Could not initialize Zstd instance"_kj, "ERR_ZLIB_INITIALIZATION_FAILED"_kj, -1);
+        "Could not initialize zstd instance"_kj, "ERR_ZLIB_INITIALIZATION_FAILED"_kj, -1);
   }
 
   if (pledgedSrcSize != ZSTD_CONTENTSIZE_UNKNOWN) {
     size_t result = ZSTD_CCtx_setPledgedSrcSize(cctx_.get(), pledgedSrcSize);
-    KJ_IF_SOME(err, zstdCheckError(result, error_, "ERR_ZSTD_COMPRESSION_FAILED"_kj)) {
-      return kj::mv(err);
+    if (ZSTD_isError(result)) {
+      return CompressionError(
+          "Could not set pledged src size"_kj, "ERR_ZLIB_INITIALIZATION_FAILED"_kj, -1);
     }
   }
 
@@ -724,7 +771,7 @@ void ZstdEncoderContext::work() {
 kj::Maybe<CompressionError> ZstdEncoderContext::resetStream() {
   if (cctx_.get() != nullptr) {
     size_t result = ZSTD_CCtx_reset(cctx_.get(), ZSTD_reset_session_only);
-    KJ_IF_SOME(err, zstdCheckError(result, error_, "ERR_ZSTD_COMPRESSION_FAILED"_kj)) {
+    KJ_IF_SOME(err, zstdCheckError(result, error_)) {
       return kj::mv(err);
     }
   }
@@ -770,8 +817,7 @@ kj::Maybe<CompressionError> ZstdEncoderContext::setParams(int key, int value) {
 
 kj::Maybe<CompressionError> ZstdEncoderContext::getError() const {
   if (error_ != ZSTD_error_no_error) {
-    return CompressionError(kj::str("Zstd compression failed: ", ZSTD_getErrorString(error_)),
-        kj::str("ERR_ZSTD_COMPRESSION_FAILED"), -1);
+    return zstdError(error_);
   }
 
   return kj::none;
@@ -791,7 +837,7 @@ kj::Maybe<CompressionError> ZstdDecoderContext::initialize() {
   // failed due to memory allocation failure.
   if (dctx_.get() == nullptr) {
     return CompressionError(
-        "Could not initialize Zstd instance"_kj, "ERR_ZLIB_INITIALIZATION_FAILED"_kj, -1);
+        "Could not initialize zstd instance"_kj, "ERR_ZLIB_INITIALIZATION_FAILED"_kj, -1);
   }
 
   return kj::none;
@@ -872,7 +918,7 @@ bool ZstdDecoderContext::scanNextFramePrefix() {
 kj::Maybe<CompressionError> ZstdDecoderContext::resetStream() {
   if (dctx_.get() != nullptr) {
     size_t result = ZSTD_DCtx_reset(dctx_.get(), ZSTD_reset_session_only);
-    KJ_IF_SOME(err, zstdCheckError(result, error_, "ERR_ZSTD_DECOMPRESSION_FAILED"_kj)) {
+    KJ_IF_SOME(err, zstdCheckError(result, error_)) {
       return kj::mv(err);
     }
   }
@@ -900,8 +946,7 @@ kj::Maybe<CompressionError> ZstdDecoderContext::setParams(int key, int value) {
 
 kj::Maybe<CompressionError> ZstdDecoderContext::getError() const {
   if (error_ != ZSTD_error_no_error) {
-    return CompressionError(kj::str("Zstd decompression failed: ", ZSTD_getErrorString(error_)),
-        kj::str("ERR_ZSTD_DECOMPRESSION_FAILED"), -1);
+    return zstdError(error_);
   }
 
   // On the final flush, the input is truncated if it ran out before a frame ended while there was
@@ -913,7 +958,8 @@ kj::Maybe<CompressionError> ZstdDecoderContext::getError() const {
     if (decodingFrameAfterComplete_ && framePrefixSize_ < MAGIC_NUMBER_SIZE) {
       return kj::none;
     }
-    return CompressionError("unexpected end of file"_kj, "ERR_ZSTD_DECOMPRESSION_FAILED"_kj, -1);
+    // Node.js reports this as zlib does.
+    return CompressionError("unexpected end of file"_kj, "Z_BUF_ERROR"_kj, Z_BUF_ERROR);
   }
 
   return kj::none;

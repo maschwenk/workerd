@@ -212,7 +212,11 @@ export const zstdInvalidDataTest = {
     const invalidData = Buffer.from('This is not valid zstd compressed data');
     assert.throws(
       () => zlib.zstdDecompressSync(invalidData),
-      /Zstd decompression failed/,
+      {
+        code: 'ZSTD_error_prefix_unknown',
+        errno: 10,
+        message: 'Unknown frame descriptor',
+      },
       'Should throw on invalid compressed data'
     );
   },
@@ -810,5 +814,51 @@ export const zstdDecompressMaxOutputLengthWithTrailingInputTest = {
         }),
       { message: 'unexpected end of file' }
     );
+  },
+};
+// zstd errors carry the code, errno and message Node.js gives them: the ZSTD_ErrorCode's name and
+// value and zstd's description. Truncated input is Z_BUF_ERROR, as in zlib.
+export const zstdDecompressErrorCodesTest = {
+  async test() {
+    const input = Buffer.from('zstd error codes '.repeat(500));
+    const frame = zlib.zstdCompressSync(input, {
+      params: { [zlib.constants.ZSTD_c_checksumFlag]: 1 },
+    });
+    const badChecksum = Buffer.from(frame);
+    badChecksum[badChecksum.length - 1] ^= 0xff;
+    // An empty frame whose header asks for a 256 MiB window (windowLog 28), above the decoder's
+    // default limit of windowLog 27.
+    const wideWindow = Buffer.from('28b52ffd0090010000', 'hex');
+    const cases = [
+      [
+        Buffer.from('not zstd'),
+        'ZSTD_error_prefix_unknown',
+        10,
+        'Unknown frame descriptor',
+      ],
+      [
+        badChecksum,
+        'ZSTD_error_checksum_wrong',
+        22,
+        "Restored data doesn't match checksum",
+      ],
+      [
+        wideWindow,
+        'ZSTD_error_frameParameter_windowTooLarge',
+        16,
+        'Frame requires too much memory for decoding',
+      ],
+      [frame.subarray(0, 20), 'Z_BUF_ERROR', -5, 'unexpected end of file'],
+    ];
+    for (const [data, code, errno, message] of cases) {
+      const expected = { name: 'Error', code, errno, message };
+      assert.throws(() => zlib.zstdDecompressSync(data), expected);
+      assert.throws(
+        () => zlib.zstdDecompressSync(data, { info: true }),
+        expected
+      );
+      await assert.rejects(zstdDecompressCallback(data), expected);
+      await assert.rejects(zstdDecompressStreaming(data, 64), expected);
+    }
   },
 };
