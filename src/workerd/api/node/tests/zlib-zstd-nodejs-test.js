@@ -911,3 +911,42 @@ export const zstdParameterErrorsTest = {
     }
   },
 };
+
+// Node.js checks pledgedSrcSize for every zstd entry point, compression or decompression.
+export const zstdPledgedSrcSizeValidationTest = {
+  test() {
+    const frame = zlib.zstdCompressSync('pledged');
+    const entryPoints = [
+      (options) => zlib.createZstdCompress(options),
+      (options) => zlib.createZstdDecompress(options),
+      (options) => zlib.zstdCompressSync('pledged', options),
+      (options) => zlib.zstdCompress('pledged', options, () => {}),
+      (options) => zlib.zstdDecompressSync(frame, options),
+      (options) => zlib.zstdDecompress(frame, options, () => {}),
+    ];
+    const cases = [
+      ['7', 'TypeError', 'ERR_INVALID_ARG_TYPE', 'must be a number'],
+      [null, 'TypeError', 'ERR_INVALID_ARG_TYPE', 'must be a number'],
+      [1.5, 'RangeError', 'ERR_OUT_OF_RANGE', 'must be a safe integer'],
+      [2 ** 53, 'RangeError', 'ERR_OUT_OF_RANGE', 'must be a safe integer'],
+      [-1, 'RangeError', 'ERR_OUT_OF_RANGE', 'must be non-negative'],
+    ];
+    for (const make of entryPoints) {
+      for (const [pledgedSrcSize, name, code, message] of cases) {
+        assert.throws(() => make({ pledgedSrcSize }), {
+          name,
+          code,
+          message: `pledgedSrcSize ${message}`,
+        });
+      }
+    }
+    assert.strictEqual(
+      zlib
+        .zstdDecompressSync(
+          zlib.zstdCompressSync('pledged', { pledgedSrcSize: 7 })
+        )
+        .toString(),
+      'pledged'
+    );
+  },
+};

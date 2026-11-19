@@ -22,6 +22,8 @@ import {
   ERR_ZSTD_INVALID_PARAM,
   ERR_ZLIB_INITIALIZATION_FAILED,
   NodeError,
+  NodeRangeError,
+  NodeTypeError,
 } from 'node-internal:internal_errors';
 import { Transform, type DuplexOptions } from 'node-internal:streams_transform';
 import { eos as finished } from 'node-internal:streams_end_of_stream';
@@ -863,6 +865,32 @@ export function setZstdParams(
   }
 }
 
+// Node.js checks pledgedSrcSize, for compression and decompression alike, when it initializes the
+// native handle.
+export function validateZstdPledgedSrcSize(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== 'number') {
+    throw new NodeTypeError(
+      'ERR_INVALID_ARG_TYPE',
+      'pledgedSrcSize must be a number'
+    );
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new NodeRangeError(
+      'ERR_OUT_OF_RANGE',
+      'pledgedSrcSize must be a safe integer'
+    );
+  }
+  if (value < 0) {
+    throw new NodeRangeError(
+      'ERR_OUT_OF_RANGE',
+      'pledgedSrcSize must be non-negative'
+    );
+  }
+}
+
 export class Zstd extends ZlibBase {
   constructor(
     options: ZstdOptions | undefined | null,
@@ -881,6 +909,7 @@ export class Zstd extends ZlibBase {
     const _writeState = new Uint32Array(2);
 
     const pledgedSrcSize = options?.pledgedSrcSize;
+    validateZstdPledgedSrcSize(pledgedSrcSize);
 
     // initialize() reports why it failed through the error handler. ZlibBase installs the real
     // handler below; until then, keep the message for the error thrown here.

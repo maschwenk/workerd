@@ -22,6 +22,7 @@ import {
   kMaxZstdCParam,
   kMaxZstdDParam,
   setZstdParams,
+  validateZstdPledgedSrcSize,
   type ZlibBase,
 } from 'node-internal:internal_zlib_base';
 
@@ -372,6 +373,7 @@ function zstdOneShotOptions(
 ): ZstdOptions {
   const opts = options ?? {};
   setZstdParams(opts.params, initParamsArray, maxParam);
+  validateZstdPledgedSrcSize(opts.pledgedSrcSize);
   const params: Record<number, number> = {};
   for (let key = 0; key < initParamsArray.length; key++) {
     const value = initParamsArray[key] as number;
