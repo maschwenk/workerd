@@ -558,10 +558,30 @@ class ZstdDecoderContext final: public ZstdContext {
   bool isStreamEnd() const;
 
  private:
-  size_t lastResult = 0;
+  // Reads the bytes after a completed frame (without consuming them) until four bytes have been
+  // seen, which is enough to tell whether they start another frame. Returns false as soon as they
+  // can no longer be the magic number of a zstd frame or a skippable frame.
+  bool scanNextFramePrefix();
+
   kj::Own<ZSTD_DCtx> dctx_;
   ZSTD_ErrorCode error_ = ZSTD_error_no_error;
-  bool frameInProgress_ = false;
+
+  // The input is a sequence of frames, as zstd and Node.js define it: zstd frames and skippable
+  // frames, in any order, optionally followed by bytes that are not a frame, which are ignored.
+
+  // The last ZSTD_decompressStream() call ended a frame.
+  bool frameComplete_ = false;
+  // The input after a completed frame is being read as the start of another one.
+  bool decodingFrameAfterComplete_ = false;
+  // The input after a completed frame is not a frame; it, and all input after it, is ignored.
+  bool ignoringTrailingInput_ = false;
+  // How many bytes of the next frame's 4-byte magic number scanNextFramePrefix() has seen.
+  uint8_t framePrefixSize_ = 0;
+  // Which kinds of frame those bytes can still start, as a set of FRAME_* bits.
+  uint8_t possibleFrameTypes_ = 0;
+  static constexpr uint8_t FRAME_ZSTD = 1;
+  static constexpr uint8_t FRAME_SKIPPABLE = 2;
+  static constexpr uint8_t MAGIC_NUMBER_SIZE = 4;
 };
 
 }  // namespace workerd::api

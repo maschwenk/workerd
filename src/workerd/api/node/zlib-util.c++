@@ -794,11 +794,22 @@ static kj::Array<kj::byte> syncProcessBuffer(jsg::Lock& js, Context& ctx, Growab
     result.adjustUnused(ctx.getAvailOut());
 
     if (ctx.getAvailOut() == 0 && result.atMaxCapacity()) {
-      // The output buffer was completely filled and has reached maxOutputLength.
-      // If the stream is done, the output just happened to fit exactly — return it.
-      // Otherwise the decompressed data exceeds maxOutputLength.
+      // The output buffer was completely filled and has reached maxOutputLength. If the stream
+      // is done, the output just happened to fit exactly; return it. Otherwise, like Node.js,
+      // which fails only once the output grows past maxOutputLength, run the codec once more
+      // with room for one byte: input left over that produces no output (such as a skippable
+      // zstd frame, or trailing bytes the decoder ignores) still fits, and input that ends too
+      // early is still reported as such.
       if (!ctx.isStreamEnd()) {
-        throwWithCode(js, js.rangeError("Memory limit exceeded"_kj), "ERR_BUFFER_TOO_LARGE"_kj);
+        kj::byte probe;
+        ctx.setOutputBuffer(kj::arrayPtr(&probe, 1));
+        ctx.work();
+        KJ_IF_SOME(error, ctx.getError()) {
+          throwCompressionError(js, error);
+        }
+        if (ctx.getAvailOut() == 0) {
+          throwWithCode(js, js.rangeError("Memory limit exceeded"_kj), "ERR_BUFFER_TOO_LARGE"_kj);
+        }
       }
       break;
     }

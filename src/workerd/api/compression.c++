@@ -801,18 +801,72 @@ void ZstdDecoderContext::work() {
   JSG_REQUIRE(mode == ZlibMode::ZSTD_DECODE, Error, "Mode should be ZSTD_DECODE"_kj);
   JSG_REQUIRE(dctx_.get() != nullptr, Error, "Zstd context should not be null"_kj);
 
-  auto inputPosBefore = input_.pos;
-  lastResult = ZSTD_decompressStream(dctx_.get(), &output_, &input_);
-
-  if (ZSTD_isError(lastResult)) {
-    error_ = ZSTD_getErrorCode(lastResult);
-  } else if (lastResult == 0) {
-    frameInProgress_ = false;
-  } else if (input_.pos > inputPosBefore) {
-    // A call that consumes no input only drains buffered output, or, after a frame has ended,
-    // returns the header size hint for a frame that hasn't started. Neither starts a frame.
-    frameInProgress_ = true;
+  if (ignoringTrailingInput_) {
+    return;
   }
+
+  // The sync loop and the stream's JavaScript loop call again with no new input when the previous
+  // call filled the output buffer. Once a frame has ended, such a call must not begin another:
+  // zstd would return the header size of a frame that isn't there, which reads as a truncated one.
+  if (frameComplete_ && input_.pos == input_.size) {
+    return;
+  }
+
+  // ZSTD_decompressStream() stops at the end of each frame, so keep going while input and output
+  // space are left: the input can hold several frames.
+  do {
+    if (frameComplete_) {
+      decodingFrameAfterComplete_ = true;
+      framePrefixSize_ = 0;
+      possibleFrameTypes_ = FRAME_ZSTD | FRAME_SKIPPABLE;
+    }
+
+    if (decodingFrameAfterComplete_ && !scanNextFramePrefix()) {
+      // What follows the last frame is not a frame. Like Node.js, ignore it rather than report the
+      // error zstd would.
+      frameComplete_ = true;
+      decodingFrameAfterComplete_ = false;
+      ignoringTrailingInput_ = true;
+      return;
+    }
+
+    size_t result = ZSTD_decompressStream(dctx_.get(), &output_, &input_);
+    if (ZSTD_isError(result)) {
+      frameComplete_ = false;
+      error_ = ZSTD_getErrorCode(result);
+      return;
+    }
+
+    // 0 means the frame is completely decoded and flushed.
+    frameComplete_ = result == 0;
+    if (frameComplete_) {
+      decodingFrameAfterComplete_ = false;
+    }
+  } while (frameComplete_ && input_.pos < input_.size && output_.pos < output_.size);
+}
+
+bool ZstdDecoderContext::scanNextFramePrefix() {
+  // ZSTD_MAGICNUMBER and ZSTD_MAGIC_SKIPPABLE_START, little-endian. A skippable frame's magic
+  // number can end in any of 16 values, so only the high nibble of its first byte is fixed.
+  static constexpr kj::byte ZSTD_MAGIC[] = {0x28, 0xb5, 0x2f, 0xfd};
+  static constexpr kj::byte SKIPPABLE_MAGIC[] = {0x50, 0x2a, 0x4d, 0x18};
+
+  auto next = kj::arrayPtr(static_cast<const kj::byte*>(input_.src), input_.size).slice(input_.pos);
+  for (auto byte: next) {
+    if (framePrefixSize_ >= MAGIC_NUMBER_SIZE) {
+      break;
+    }
+    if (byte != ZSTD_MAGIC[framePrefixSize_]) {
+      possibleFrameTypes_ &= ~FRAME_ZSTD;
+    }
+    bool skippableByte = framePrefixSize_ == 0 ? (byte & 0xf0) == SKIPPABLE_MAGIC[0]
+                                               : byte == SKIPPABLE_MAGIC[framePrefixSize_];
+    if (!skippableByte) {
+      possibleFrameTypes_ &= ~FRAME_SKIPPABLE;
+    }
+    ++framePrefixSize_;
+  }
+  return possibleFrameTypes_ != 0;
 }
 
 kj::Maybe<CompressionError> ZstdDecoderContext::resetStream() {
@@ -822,7 +876,11 @@ kj::Maybe<CompressionError> ZstdDecoderContext::resetStream() {
       return kj::mv(err);
     }
   }
-  frameInProgress_ = false;
+  frameComplete_ = false;
+  decodingFrameAfterComplete_ = false;
+  ignoringTrailingInput_ = false;
+  framePrefixSize_ = 0;
+  possibleFrameTypes_ = 0;
   return kj::none;
 }
 
@@ -846,10 +904,15 @@ kj::Maybe<CompressionError> ZstdDecoderContext::getError() const {
         kj::str("ERR_ZSTD_DECOMPRESSION_FAILED"), -1);
   }
 
-  // If this is the final flush, we're mid-frame (frame was started but never
-  // completed), and the output buffer is not full (decoder had space but
-  // couldn't produce more output), the input was truncated.
-  if (flush_ == ZSTD_e_end && frameInProgress_ && output_.pos < output_.size) {
+  // On the final flush, the input is truncated if it ran out before a frame ended while there was
+  // still room for output. That includes input with no frame at all, such as an empty buffer.
+  if (flush_ == ZSTD_e_end && !frameComplete_ && input_.pos == input_.size &&
+      output_.pos < output_.size) {
+    // Up to three bytes after a complete frame are too short to tell a truncated magic number from
+    // junk, and are ignored as junk is.
+    if (decodingFrameAfterComplete_ && framePrefixSize_ < MAGIC_NUMBER_SIZE) {
+      return kj::none;
+    }
     return CompressionError("unexpected end of file"_kj, "ERR_ZSTD_DECOMPRESSION_FAILED"_kj, -1);
   }
 
@@ -857,8 +920,10 @@ kj::Maybe<CompressionError> ZstdDecoderContext::getError() const {
 }
 
 bool ZstdDecoderContext::isStreamEnd() const {
-  // ZSTD_decompressStream returns 0 when a frame is completely decoded and fully flushed.
-  return !ZSTD_isError(lastResult) && lastResult == 0;
+  // A frame has ended, and the input after it is used up or has been found not to be a frame.
+  // Input after a frame that work() hasn't read yet, because the output filled up first, may
+  // still hold another frame.
+  return frameComplete_ && (input_.pos == input_.size || ignoringTrailingInput_);
 }
 
 }  // namespace workerd::api
