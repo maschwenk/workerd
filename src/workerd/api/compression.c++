@@ -717,6 +717,12 @@ CompressionError zstdError(ZSTD_ErrorCode error) {
   return CompressionError(ZSTD_getErrorString(error), zstdErrorCodeName(error), error);
 }
 
+// Node.js reports every parameter zstd rejects, and every parameter workerd doesn't support, the
+// same way.
+CompressionError zstdParameterError() {
+  return CompressionError("Setting parameter failed"_kj, "ERR_ZSTD_PARAM_SET_FAILED"_kj, -1);
+}
+
 // Helper to check ZSTD errors and return a CompressionError if present.
 // Also sets the error code in the provided reference for later retrieval.
 kj::Maybe<CompressionError> zstdCheckError(size_t result, ZSTD_ErrorCode& error) {
@@ -804,13 +810,11 @@ kj::Maybe<CompressionError> ZstdEncoderContext::setParams(int key, int value) {
     case ZSTD_c_overlapLog:
       break;
     default:
-      return CompressionError(kj::str("Unsupported Zstd compression parameter: ", key),
-          "ERR_ZSTD_PARAM_SET_FAILED"_kj, -1);
+      return zstdParameterError();
   }
   size_t result = ZSTD_CCtx_setParameter(cctx_.get(), static_cast<ZSTD_cParameter>(key), value);
   if (ZSTD_isError(result)) {
-    return CompressionError(kj::str("Setting parameter failed: ", ZSTD_getErrorName(result)),
-        "ERR_ZSTD_PARAM_SET_FAILED"_kj, -1);
+    return zstdParameterError();
   }
   return kj::none;
 }
@@ -933,13 +937,11 @@ kj::Maybe<CompressionError> ZstdDecoderContext::resetStream() {
 kj::Maybe<CompressionError> ZstdDecoderContext::setParams(int key, int value) {
   KJ_DASSERT(dctx_.get() != nullptr, "Zstd decompression context should not be null");
   if (key != ZSTD_d_windowLogMax) {
-    return CompressionError(kj::str("Unsupported Zstd decompression parameter: ", key),
-        "ERR_ZSTD_PARAM_SET_FAILED"_kj, -1);
+    return zstdParameterError();
   }
   size_t result = ZSTD_DCtx_setParameter(dctx_.get(), static_cast<ZSTD_dParameter>(key), value);
   if (ZSTD_isError(result)) {
-    return CompressionError(kj::str("Setting parameter failed: ", ZSTD_getErrorName(result)),
-        "ERR_ZSTD_PARAM_SET_FAILED"_kj, -1);
+    return zstdParameterError();
   }
   return kj::none;
 }

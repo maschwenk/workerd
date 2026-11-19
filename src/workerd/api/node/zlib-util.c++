@@ -916,54 +916,75 @@ void ZlibUtil::brotliWithCallback(
   cb(js, kj::mv(res));
 }
 
+namespace {
+// Equivalent to Node.js' THROW_ERR_ZLIB_INITIALIZATION_FAILED, which the ZstdCompress and
+// ZstdDecompress constructors throw when the context can't be set up.
+[[noreturn]] void throwInitializationError(jsg::Lock& js, const CompressionError& error) {
+  throwWithCode(js, js.error(error.message), "ERR_ZLIB_INITIALIZATION_FAILED"_kj);
+}
+
+// Validates the options and sets up the context for a one-shot call. Errors are thrown, never
+// passed to a callback: Node.js constructs a stream for the one-shot functions, and its
+// constructor throws them.
 template <typename Context>
-kj::Array<kj::byte> ZlibUtil::zstdSync(jsg::Lock& js, InputSource data, ZstdContext::Options opts) {
-  Context ctx(Context::Mode);
-
-  auto chunkSize = opts.chunkSize.orDefault(ZLIB_PERFORMANT_CHUNK_SIZE);
-  auto maxOutputLength = opts.maxOutputLength.orDefault(Z_MAX_CHUNK);
-
-  checkChunkOptions(js, chunkSize, maxOutputLength);
-  GrowableBuffer result(ZLIB_PERFORMANT_CHUNK_SIZE, maxOutputLength);
-
-  // Initialize the context
+void initializeZstdSync(jsg::Lock& js, Context& ctx, ZstdContext::Options& opts) {
   if constexpr (Context::Mode == ZlibMode::ZSTD_ENCODE) {
     uint64_t pledgedSrcSize = opts.pledgedSrcSize.orDefault(ZSTD_CONTENTSIZE_UNKNOWN);
     KJ_IF_SOME(err, ctx.initialize(pledgedSrcSize)) {
-      throwCompressionError(js, err);
+      throwInitializationError(js, err);
     }
   } else {
     KJ_IF_SOME(err, ctx.initialize()) {
-      throwCompressionError(js, err);
+      throwInitializationError(js, err);
     }
   }
 
-  // Set parameters
   KJ_IF_SOME(params, opts.params) {
     for (const auto& field: params.fields) {
       KJ_IF_SOME(err, ctx.setParams(field.name.parseAs<int>(), field.value)) {
-        throwCompressionError(js, err);
+        throwInitializationError(js, err);
       }
     }
   }
+
+  checkChunkOptions(js, opts.chunkSize.orDefault(ZLIB_PERFORMANT_CHUNK_SIZE),
+      opts.maxOutputLength.orDefault(Z_MAX_CHUNK));
 
   auto flush = opts.flush.orDefault(ZSTD_e_continue);
   checkRange(js, "options.flush"_kj, flush, ZSTD_e_continue, ZSTD_e_end);
 
   auto finishFlush = opts.finishFlush.orDefault(ZSTD_e_end);
   checkRange(js, "options.finishFlush"_kj, finishFlush, ZSTD_e_continue, ZSTD_e_end);
-
   ctx.setFlush(finishFlush);
+}
+
+template <typename Context>
+kj::Array<kj::byte> processZstdSync(jsg::Lock& js,
+    Context& ctx,
+    const ZlibUtil::InputSource& data,
+    const ZstdContext::Options& opts) {
+  GrowableBuffer result(ZLIB_PERFORMANT_CHUNK_SIZE, opts.maxOutputLength.orDefault(Z_MAX_CHUNK));
   ctx.setInputBuffer(getInputFromSource(data));
   return syncProcessBuffer(js, ctx, result);
+}
+}  // namespace
+
+template <typename Context>
+kj::Array<kj::byte> ZlibUtil::zstdSync(jsg::Lock& js, InputSource data, ZstdContext::Options opts) {
+  Context ctx(Context::Mode);
+  initializeZstdSync(js, ctx, opts);
+  return processZstdSync(js, ctx, data, opts);
 }
 
 template <typename Context>
 void ZlibUtil::zstdWithCallback(
     jsg::Lock& js, InputSource data, ZstdContext::Options options, CompressCallback cb) {
+  Context ctx(Context::Mode);
+  initializeZstdSync(js, ctx, options);
+
   // Capture only relevant errors so they can be passed to the callback
   auto res = js.tryCatch([&]() {
-    return CompressCallbackArg(zstdSync<Context>(js, kj::mv(data), kj::mv(options)));
+    return CompressCallbackArg(processZstdSync(js, ctx, data, options));
   }, [&](jsg::Value&& exception) {
     return CompressCallbackArg(jsg::JsValue(exception.getHandle(js)));
   });

@@ -832,6 +832,37 @@ const zstdDefaultOptions: ZlibDefaultOptions = {
   fullFlush: CONST_ZSTD_e_flush,
 };
 
+// Validates zstd `params` as Node.js does and records them in initParamsArray, where -1 marks a
+// parameter that isn't set. (So does a value of -1, as in Node.js.)
+export function setZstdParams(
+  params: ZstdOptions['params'],
+  initParamsArray: Int32Array,
+  maxParam: number
+): void {
+  initParamsArray.fill(-1);
+  if (!params) {
+    return;
+  }
+  for (const [origKey, value] of Object.entries(params)) {
+    const key = +origKey;
+    if (
+      Number.isNaN(key) ||
+      key < 0 ||
+      key > maxParam ||
+      ((initParamsArray[key] as number) | 0) !== -1
+    ) {
+      throw new ERR_ZSTD_INVALID_PARAM(origKey);
+    }
+
+    if (typeof value !== 'number' && typeof value !== 'boolean') {
+      throw new ERR_INVALID_ARG_TYPE('options.params[key]', 'number', value);
+    }
+    // as number is required to avoid force type coercion on runtime.
+    // boolean has number representation, but typescript doesn't understand it.
+    initParamsArray[key] = value as number;
+  }
+}
+
 export class Zstd extends ZlibBase {
   constructor(
     options: ZstdOptions | undefined | null,
@@ -840,32 +871,7 @@ export class Zstd extends ZlibBase {
     maxParam: number
   ) {
     ok(mode === CONST_ZSTD_DECODE || mode === CONST_ZSTD_ENCODE);
-    initParamsArray.fill(-1);
-
-    if (options?.params) {
-      for (const [origKey, value] of Object.entries(options.params)) {
-        const key = +origKey;
-        if (
-          Number.isNaN(key) ||
-          key < 0 ||
-          key > maxParam ||
-          ((initParamsArray[key] as number) | 0) !== -1
-        ) {
-          throw new ERR_ZSTD_INVALID_PARAM(origKey);
-        }
-
-        if (typeof value !== 'number' && typeof value !== 'boolean') {
-          throw new ERR_INVALID_ARG_TYPE(
-            'options.params[key]',
-            'number',
-            value
-          );
-        }
-        // as number is required to avoid force type coercion on runtime.
-        // boolean has number representation, but typescript doesn't understand it.
-        initParamsArray[key] = value as number;
-      }
-    }
+    setZstdParams(options?.params, initParamsArray, maxParam);
 
     const handle =
       mode === CONST_ZSTD_DECODE
@@ -876,6 +882,12 @@ export class Zstd extends ZlibBase {
 
     const pledgedSrcSize = options?.pledgedSrcSize;
 
+    // initialize() reports why it failed through the error handler. ZlibBase installs the real
+    // handler below; until then, keep the message for the error thrown here.
+    let initializationError: string | undefined;
+    handle.setErrorHandler((_errno, _code, message) => {
+      initializationError = message;
+    });
     if (
       !handle.initialize(
         initParamsArray,
@@ -886,7 +898,7 @@ export class Zstd extends ZlibBase {
         pledgedSrcSize
       )
     ) {
-      throw new ERR_ZLIB_INITIALIZATION_FAILED();
+      throw new ERR_ZLIB_INITIALIZATION_FAILED(initializationError);
     }
 
     super(options ?? {}, mode, handle, zstdDefaultOptions);

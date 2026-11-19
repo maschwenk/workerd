@@ -50,30 +50,53 @@ export const rejectsUnsupportedNativeParameters = {
 };
 
 export const rejectsUnsupportedOneShotParameters = {
-  async test() {
+  test() {
     const input = Buffer.from('Zstd parameter validation');
     const compressed = zlib.zstdCompressSync(input);
+    const callbackNotCalled = () => assert.fail('callback called');
     for (const decompress of [false, true]) {
       const sync = decompress ? zlib.zstdDecompressSync : zlib.zstdCompressSync;
       const callback = decompress ? zlib.zstdDecompress : zlib.zstdCompress;
       const data = decompress ? compressed : input;
+      // As in Node.js, a key outside the range of zstd's parameter numbers is invalid, and the
+      // functions with a callback throw rather than call it.
       for (const parameter of [
-        -1, 10, 500, 1000, 1001, 1006, 1007, 2147483647,
+        -1,
+        500,
+        1000,
+        1001,
+        1006,
+        1007,
+        2147483647,
+        'abc',
+        '1e9',
       ]) {
         const options = { params: { [parameter]: 1 } };
-        const message =
-          /Unsupported Zstd (compression|decompression) parameter/;
-        assert.throws(() => sync(data, options), message);
-        await new Promise((resolve, reject) => {
-          callback(data, options, (error) => {
-            try {
-              assert.match(error?.message, message);
-              resolve();
-            } catch (error) {
-              reject(error);
-            }
-          });
-        });
+        const expected = {
+          name: 'RangeError',
+          code: 'ERR_ZSTD_INVALID_PARAM',
+          message: `${parameter} is not a valid zstd parameter`,
+        };
+        assert.throws(() => sync(data, options), expected);
+        assert.throws(
+          () => callback(data, options, callbackNotCalled),
+          expected
+        );
+      }
+      // A key in range that isn't a parameter fails to initialize, and so does one of zstd's
+      // experimental parameters, which Node.js accepts but workerd doesn't support.
+      for (const parameter of [50, 10]) {
+        const options = { params: { [parameter]: 1 } };
+        const expected = {
+          name: 'Error',
+          code: 'ERR_ZLIB_INITIALIZATION_FAILED',
+          message: 'Setting parameter failed',
+        };
+        assert.throws(() => sync(data, options), expected);
+        assert.throws(
+          () => callback(data, options, callbackNotCalled),
+          expected
+        );
       }
     }
   },

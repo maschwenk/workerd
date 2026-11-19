@@ -862,3 +862,52 @@ export const zstdDecompressErrorCodesTest = {
     }
   },
 };
+
+// From Node.js' test-zlib-zstd.js: invalid keys, duplicate keys and values zstd rejects, through
+// the stream constructors and the one-shot functions.
+export const zstdParameterErrorsTest = {
+  test() {
+    const { constants } = zlib;
+    const invalid = (key) => ({
+      code: 'ERR_ZSTD_INVALID_PARAM',
+      name: 'RangeError',
+      message: `${key} is not a valid zstd parameter`,
+    });
+    const setFailed = {
+      code: 'ERR_ZLIB_INITIALIZATION_FAILED',
+      name: 'Error',
+      message: 'Setting parameter failed',
+    };
+    const compress = [
+      (options) => zlib.createZstdCompress(options),
+      (options) => zlib.zstdCompressSync('', options),
+      (options) => zlib.zstdCompress('', options, () => {}),
+    ];
+    const decompress = [
+      (options) => zlib.createZstdDecompress(options),
+      (options) => zlib.zstdDecompressSync(zlib.zstdCompressSync(''), options),
+    ];
+    for (const make of [...compress, ...decompress]) {
+      assert.throws(() => make({ params: { 10000: 0 } }), invalid(10000));
+      assert.throws(() => make({ params: { 0: 0, '00': 0 } }), invalid('00'));
+    }
+    for (const make of compress) {
+      // Not a valid ZSTD_strategy.
+      assert.throws(
+        () => make({ params: { [constants.ZSTD_c_strategy]: 130 } }),
+        setFailed
+      );
+      assert.throws(
+        () => make({ params: { [constants.ZSTD_c_compressionLevel]: 'high' } }),
+        { code: 'ERR_INVALID_ARG_TYPE', name: 'TypeError' }
+      );
+    }
+    for (const make of decompress) {
+      // Below ZSTD_WINDOWLOG_ABSOLUTEMIN.
+      assert.throws(
+        () => make({ params: { [constants.ZSTD_d_windowLogMax]: 1 } }),
+        setFailed
+      );
+    }
+  },
+};

@@ -21,6 +21,7 @@ import {
   zstdInitDParamsArray,
   kMaxZstdCParam,
   kMaxZstdDParam,
+  setZstdParams,
   type ZlibBase,
 } from 'node-internal:internal_zlib_base';
 
@@ -362,32 +363,61 @@ export function brotliCompress(
   processChunkCaptureError(new BrotliCompress(options), data, callback);
 }
 
+// The one-shot zstd functions check their options as the ZstdCompress and ZstdDecompress
+// constructors do, and give C++ the parameters those would set.
+function zstdOneShotOptions(
+  options: ZstdOptions | null | undefined,
+  initParamsArray: Int32Array,
+  maxParam: number
+): ZstdOptions {
+  const opts = options ?? {};
+  setZstdParams(opts.params, initParamsArray, maxParam);
+  const params: Record<number, number> = {};
+  for (let key = 0; key < initParamsArray.length; key++) {
+    const value = initParamsArray[key] as number;
+    if (value !== -1) {
+      params[key] = value;
+    }
+  }
+  return { ...opts, params };
+}
+
 export function zstdDecompressSync(
   data: ArrayBufferView | string,
-  options: ZstdOptions = {}
+  options?: ZstdOptions | null
 ): ZlibResult {
   validateInput(data);
-  if (!options.info) {
+  const opts = zstdOneShotOptions(
+    options,
+    zstdInitDParamsArray,
+    kMaxZstdDParam
+  );
+  if (!opts.info) {
     // Fast path, where we send the data directly to C++
-    return Buffer.from(zlibUtil.zstdDecompressSync(data, options));
+    return Buffer.from(zlibUtil.zstdDecompressSync(data, opts));
   }
 
   // Else, use the Engine class in sync mode
-  return processChunk(new ZstdDecompress(options), data);
+  return processChunk(new ZstdDecompress(opts), data);
 }
 
 export function zstdCompressSync(
   data: ArrayBufferView | string,
-  options: ZstdOptions = {}
+  options?: ZstdOptions | null
 ): ZlibResult {
   validateInput(data);
-  if (!options.info) {
+  const opts = zstdOneShotOptions(
+    options,
+    zstdInitCParamsArray,
+    kMaxZstdCParam
+  );
+  if (!opts.info) {
     // Fast path, where we send the data directly to C++
-    return Buffer.from(zlibUtil.zstdCompressSync(data, options));
+    return Buffer.from(zlibUtil.zstdCompressSync(data, opts));
   }
 
   // Else, use the Engine class in sync mode
-  return processChunk(new ZstdCompress(options), data);
+  return processChunk(new ZstdCompress(opts), data);
 }
 
 export function zstdDecompress(
@@ -400,10 +430,15 @@ export function zstdDecompress(
     callbackOrUndefined
   );
   validateInput(data);
+  const opts = zstdOneShotOptions(
+    options,
+    zstdInitDParamsArray,
+    kMaxZstdDParam
+  );
 
-  if (!options.info) {
+  if (!opts.info) {
     // Fast path
-    zlibUtil.zstdDecompress(data, options, (res) => {
+    zlibUtil.zstdDecompress(data, opts, (res) => {
       queueMicrotask(() => {
         if (res instanceof Error) {
           callback(res);
@@ -416,7 +451,7 @@ export function zstdDecompress(
     return;
   }
 
-  processChunkCaptureError(new ZstdDecompress(options), data, callback);
+  processChunkCaptureError(new ZstdDecompress(opts), data, callback);
 }
 
 export function zstdCompress(
@@ -429,10 +464,15 @@ export function zstdCompress(
     callbackOrUndefined
   );
   validateInput(data);
+  const opts = zstdOneShotOptions(
+    options,
+    zstdInitCParamsArray,
+    kMaxZstdCParam
+  );
 
-  if (!options.info) {
+  if (!opts.info) {
     // Fast path
-    zlibUtil.zstdCompress(data, options, (res) => {
+    zlibUtil.zstdCompress(data, opts, (res) => {
       queueMicrotask(() => {
         if (res instanceof Error) {
           callback(res);
@@ -445,7 +485,7 @@ export function zstdCompress(
     return;
   }
 
-  processChunkCaptureError(new ZstdCompress(options), data, callback);
+  processChunkCaptureError(new ZstdCompress(opts), data, callback);
 }
 export class Gzip extends Zlib {
   constructor(options: ZlibOptions) {
